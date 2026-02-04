@@ -1,0 +1,76 @@
+---
+title: "Duration字段清洗"
+author: "数据分析师"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+```
+
+## 1. 读取数据
+
+```{r load_data}
+# 读取原始电影数据
+movies <- read.csv("netflix_movies_detailed_up_to_2025.csv", stringsAsFactors = FALSE)
+
+# 读取combined数据
+combined <- read.csv("combined_movies_data.csv", stringsAsFactors = FALSE)
+
+# 显示数据基本信息
+cat("原始电影数据维度：", dim(movies), "\n")
+cat("Combined数据维度：", dim(combined), "\n")
+```
+
+## 2. 处理Duration格式
+
+```{r process_duration}
+# 从combined数据中提取duration信息
+combined$duration <- sapply(combined$Duration, function(x) {
+  if(is.na(x)) return(NA)
+  hours <- as.numeric(str_extract(x, "\\d+(?=h)"))
+  mins <- as.numeric(str_extract(x, "\\d+(?=m)"))
+  if(is.na(hours)) hours <- 0
+  if(is.na(mins)) mins <- 0
+  return(hours * 60 + mins)
+})
+
+# 创建title和duration的映射
+duration_map <- combined %>%
+  select(Title, duration) %>%
+  distinct()
+
+# 显示映射示例
+cat("Duration映射示例：\n")
+print(head(duration_map))
+```
+
+## 3. 更新电影数据
+
+```{r update_movies}
+# 使用title匹配更新duration
+movies_updated <- movies %>%
+  left_join(duration_map, by = c("title" = "Title")) %>%
+  mutate(duration = coalesce(duration.y, duration.x)) %>%
+  select(-duration.x, -duration.y)
+
+# 检查更新结果
+cat("更新前duration示例：\n")
+print(head(movies$duration))
+cat("\n更新后duration示例：\n")
+print(head(movies_updated$duration))
+
+# 统计更新情况
+cat("\n成功更新的记录数：", sum(!is.na(movies_updated$duration)), "\n")
+cat("未更新的记录数：", sum(is.na(movies_updated$duration)), "\n")
+```
+
+## 4. 保存更新后的数据
+
+```{r save_data}
+# 保存更新后的数据
+write.csv(movies_updated, "netflix_movies_detailed_up_to_2025.csv", row.names = FALSE)
+``` 

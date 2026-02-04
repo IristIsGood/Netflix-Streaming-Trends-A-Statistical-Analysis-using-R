@@ -1,0 +1,1954 @@
+---
+title: "Netflix与电影数据分析期末大作业"
+author: "温馨仪"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    code_folding: show
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(skimr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(ggthemes)
+library(plotly)
+library(lubridate)
+library(caret)
+library(cluster)
+library(arules)
+library(dplyr)
+library(tidyr)
+
+library(arules)
+library(arulesViz)
+library(tidyverse)
+library(caret)
+library(stringr)
+
+```
+
+# Netflix与电影数据分析期末大作业
+
+## 1. 引言
+
+随着流媒体服务的快速发展，内容数据分析对平台运营策略至关重要。本作业通过结合 Netflix 的内容信息和 IMDB 的用户评价数据，来分析将探讨内容特征、观众偏好与商业表现之间的关系，并提出优化策略。
+
+## 2. 数据准备与清洗
+
+### 2.1 数据加载
+
+本作业使用的数据集包括：\
+
+1.  Netflix 影视内容数据：
+    -   `netflix_movies_detailed_up_to_2025.csv`（电影数据）
+
+```{r load_data}
+movies <- read.csv("netflix_movies_detailed_up_to_2025_ori.csv", stringsAsFactors = FALSE)
+print(head(movies))
+```
+
+-   `netflix_tv_shows_detailed_up_to_2025_ori.csv`（剧集数据）
+
+```{r }
+tv_shows <- read.csv("netflix_tv_shows_detailed_up_to_2025_ori.csv", stringsAsFactors = FALSE)
+print(head(tv_shows))
+```
+
+2.  IMDB 影视评分数据：从 Kaggle 下载并手动整合2010–2025年的电影数据
+
+```{r }
+combined <- read.csv("combined_movies_data.csv", stringsAsFactors = FALSE)
+print(head(combined))
+print(tail(combined))
+```
+
+### 2.2 检查重复值
+
+```{r check_duplicates}
+movies_duplicates <- sum(duplicated(movies))
+tv_shows_duplicates <- sum(duplicated(tv_shows))
+combined_duplicates <- sum(duplicated(combined))
+
+print('netflix_电影数据的重复值 : ')
+print(movies_duplicates)
+print('netflix_剧集数据的重复值 : ')
+print(tv_shows_duplicates)
+print('IMDB 影视剧集数据的重复值 : ')
+print(combined_duplicates)
+```
+
+### 2.3 检查空值
+
+```{r check_missing}
+movies_missing <- colSums(is.na(movies))
+print(' 检查netflix_电影数据中的空值 : ')
+print(movies_missing)
+print(colMeans(is.na(movies)) * 100)
+
+tv_shows_missing <- colSums(is.na(tv_shows))
+print(' 检查netflix_剧集数据中的空值 : ')
+print(tv_shows_missing)
+print(colMeans(is.na(tv_shows)) * 100)
+
+combined_missing <- colSums(is.na(combined))
+print('检查IMDB 影视剧集数据中的空值 : ')
+print(combined_missing)
+print(colMeans(is.na(combined)) * 100)
+
+```
+
+### 2.4 日期格式处理
+
+```{r date_format}
+movies$date_added <- as.Date(movies$date_added)
+tv_shows$date_added <- as.Date(tv_shows$date_added)
+
+print('显示netflix_电影数据中的日期范围 : ')
+print(range(movies$date_added, na.rm = TRUE))
+str(movies$date_added)
+
+print('显示netflix_剧集数据中的日期范围 : ')
+print(range(tv_shows$date_added, na.rm = TRUE))
+str(tv_shows$date_added)
+
+```
+
+### 2.5 Duration字段清洗
+
+由于netflix_电影数据中的Duration全为空，因此尽量从combined数据中提取duration信息。 通过寻找同样的title匹配后再更新duration数据。netflix_剧集数据则是把duration统一为数据类。
+
+```{r clean_duration}
+
+combined$duration <- sapply(combined$Duration, function(x) {
+  if(is.na(x)) return(NA)
+  hours <- as.numeric(str_extract(x, "\\d+(?=h)"))
+  mins <- as.numeric(str_extract(x, "\\d+(?=m)"))
+  if(is.na(hours)) hours <- 0
+  if(is.na(mins)) mins <- 0
+  return(hours * 60 + mins)
+})
+
+duration_map <- combined %>%
+  select(Title, duration) %>%
+  distinct()
+
+movies_updated <- movies %>%
+  left_join(duration_map, by = c("title" = "Title"), relationship = "many-to-many") %>%
+  mutate(duration = coalesce(duration.y, duration.x)) %>%
+  select(-duration.x, -duration.y)
+
+movies <- movies_updated
+
+tv_shows$duration <- gsub("Seasons", "", tv_shows$duration)
+tv_shows$duration <- gsub(" Season", "", tv_shows$duration)
+tv_shows$duration <- as.numeric(tv_shows$duration)
+
+print('netflix_电影数据中的Duration格式处理后: ')
+print(head(movies$duration))
+print('netflix_剧集数据中的Duration格式处理后: ')
+print(head(tv_shows$duration))
+
+```
+
+### 2.6 Genres和Country字段处理
+
+规范及统计Genres和Country字段出现的次数
+
+```{r clean_genres_country}
+
+movies <- movies %>%
+  mutate(
+    genres_count = sapply(strsplit(genres, ", ?"), length),
+    main_country = sapply(strsplit(country, ", ?"), function(x) x[1]),
+    country_count = sapply(strsplit(country, ", ?"), length)
+  )
+
+
+tv_shows <- tv_shows %>%
+  mutate(
+    genres_count = sapply(strsplit(genres, ", ?"), length),
+    main_country = sapply(strsplit(country, ", ?"), function(x) x[1]),
+    country_count = sapply(strsplit(country, ", ?"), length)
+  )
+```
+
+### 2.7 数据概览
+
+```{r data_overview}
+# 电影数据概览
+skim(movies)
+
+
+skim(tv_shows)
+```
+
+### 2.8 其他字段类型转换和异常值处理
+
+电影和电视剧数据集进行了数据清洗和格式化处理，包括将关键数值字段转换为数值类型，处理空值和对评分数据进行标准化处理（分箱）。
+
+```{r convert_types}
+
+movies$vote_count <- as.numeric(movies$vote_count)
+movies$vote_average <- as.numeric(movies$vote_average)
+movies$popularity <- as.numeric(movies$popularity)
+movies$budget <- as.numeric(movies$budget)
+movies$revenue <- as.numeric(movies$revenue)
+
+
+movies$rating_score <- suppressWarnings(as.numeric(movies$rating))
+movies$rating_grade <- ifelse(!is.na(movies$rating_score), movies$rating, NA)
+movies$rating_score_bin <- cut(
+  movies$rating_score,
+  breaks = seq(0.5, 10.5, by = 1),
+  labels = 1:10,
+  right = TRUE,
+  include.lowest = TRUE
+)
+
+tv_shows$rating_score <- suppressWarnings(as.numeric(tv_shows$rating))
+tv_shows$rating_grade <- ifelse(!is.na(tv_shows$rating_score), tv_shows$rating, NA)
+tv_shows$rating_score_bin <- cut(
+  tv_shows$rating_score,
+  breaks = seq(0.5, 10.5, by = 1),
+  labels = 1:10,
+  right = TRUE,
+  include.lowest = TRUE
+)
+
+tv_shows$director <- na_if(tv_shows$director, "")
+tv_shows$country <- na_if(tv_shows$country, "")
+```
+
+### 2.9 保存清洗后的数据
+
+清洗后的数据
+
+```{r}
+
+print(head(movies))
+
+print(head(tv_shows))
+
+```
+
+```{r save_data}
+write.csv(movies, "netflix_movies_detailed_up_to_2025.csv", row.names = FALSE)
+write.csv(tv_shows, "netflix_tv_shows_detailed_up_to_2025.csv", row.names = FALSE)
+```
+
+## A. 内容结构特征分析
+
+### A-1. 分别统计电影与剧集的结构特征
+
+ \
+ 
+####  A-1.1 类型分布分析 
+
+\
+```{r genre_analysis}
+
+movie_genres <- movies %>%
+  separate_rows(genres, sep = ", ?") %>%
+  count(genres, sort = TRUE) %>%
+  filter(!is.na(genres))
+
+
+ggplot(movie_genres %>% head(10), aes(x = reorder(genres, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "电影类型分布（前10）",
+       x = "类型",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+1.  电影类型分布（前10）\
+    -   电影中最常见的类型是Drama（剧情），数量显著高于其他类型，其次是Comedy（喜剧）和Thriller（惊悚）。
+    -   动作（Action）、浪漫（Romance）、冒险（Adventure）等类型紧随其后，但数量差距较大，说明剧情和喜剧是电影市场的主导类型。
+    -   动画（Animation）和家庭（Family）类电影数量相对较少，可能表明这些类型的目标受众更集中或产量较低。
+
+```{r }
+
+tv_genres <- tv_shows %>%
+  separate_rows(genres, sep = ", ?") %>%
+  count(genres, sort = TRUE) %>%
+  filter(!is.na(genres))
+
+
+ggplot(tv_genres %>% head(10), aes(x = reorder(genres, n), y = n)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  labs(title = "剧集类型分布（前10）",
+       x = "类型",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+2.  剧集类型分布（前10）\
+    -   剧集中Drama（剧情）和Comedy（喜剧）同样占据主导地位，但剧集的类型分布更加多元化，例如Animation（动画）和Action & Adventure（动作与冒险）的数量显著高于电影中的同类。
+    -   Sci-Fi & Fantasy（科幻与奇幻）和Mystery（悬疑）在剧集中表现突出，反映了剧集形式更适合展开复杂的长篇叙事。
+    -   剧集的总数量普遍高于电影，尤其是剧情和喜剧类，说明剧集市场的规模可能更大或更受观众欢迎。
+
+
+#### A-1.2 制作国家分布分析
+
+```{r country_analysis}
+
+movie_countries <- movies %>%
+  separate_rows(main_country, sep = ", ?") %>%
+  count(main_country, sort = TRUE) %>%
+  filter(!is.na(main_country))
+
+
+
+ggplot(movie_countries %>% head(10), aes(x = reorder(main_country, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "电影制作国家分布（前10）",
+       x = "国家",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+
+```
+
+1.  电影制作国家分布（前10）\
+
+该图展示了电影产量最高的前10个国家。美国（United States of America）以显著优势位居第一，产量远超其他国家（约6000部），其次是英国（United Kingdom）和法国（France），产量分别约为2000部和1500部左右。亚洲国家中，日本（Japan）、韩国（SouthKorea）和印度（India）表现突出，而欧洲的比利时（Belgium）和德国（Germany）也进入前十。\
+
+```{r }
+
+
+tv_countries <- tv_shows %>%
+  separate_rows(main_country, sep = ", ?") %>%
+  count(main_country, sort = TRUE) %>%
+  filter(!is.na(main_country))
+
+
+ggplot(tv_countries %>% head(10), aes(x = reorder(main_country, n), y = n)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  labs(title = "剧集制作国家分布（前10）",
+       x = "国家",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+2.  剧集制作国家分布（前10）\
+
+剧集制作的前10国家分布与电影类似，但排名有所不同。美国仍占据绝对主导地位（约2500部），但中国（China）跃居第二，产量明显高于其他国家（约1500部）。日本和韩国紧随其后，而英国、加拿大（Canada）和德国的产量相对接近。值得注意的是，菲律宾（Philippines）进入剧集前十，但未出现在电影前十中。\
+
+
+#### A-1.3 语言分布分析
+
+```{r }
+movie_languages <- movies %>%
+  count(language, sort = TRUE) %>%
+  filter(!is.na(language))
+
+
+ggplot(movie_languages %>% head(10), aes(x = reorder(language, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "电影语言分布（前10）",
+       x = "语言",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+
+```
+
+1.  电影语言分布（前10）\
+
+该图展示了电影中使用频率最高的前10种语言。英语（en）占据绝对主导地位，使用量远超其他语言（约10,000部），其次是法语（fr）和日语（ja），分别约为2,500部和2,000部。韩语（ko）、西班牙语（es）和中文（zh）也表现突出，而意大利语（it）、荷兰语（hl）、德语（de）和俄语（ru）位列前十，但数量相对较少。\
+
+```{r }
+
+tv_languages <- tv_shows %>%
+  count(language, sort = TRUE) %>%
+  filter(!is.na(language))
+
+
+ggplot(tv_languages %>% head(10), aes(x = reorder(language, n), y = n)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  coord_flip() +
+  labs(title = "剧集语言分布（前10）",
+       x = "语言",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+2.  剧集语言分布（前10）\
+    剧集语言分布与电影类似，但排名和比例有所不同。英语（en）仍居首位（约4,000部），但中文（zh）跃居第二（约3,000部），显著高于其他语言。日语（ja）和韩语（ko）紧随其后，而西班牙语（es）、法语（fr）和德语（de）的占比相对均衡。值得注意的是，阿拉伯语（ar）和葡萄牙语（pt）进入剧集前十，但未出现在电影前十中。\
+
+
+#### A-1.4 时长分布分析
+
+```{r duration_analysis}
+
+ggplot(movies %>% filter(!is.na(duration)), aes(x = duration)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  labs(title = "电影时长分布",
+       x = "时长（分钟）",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+```
+
+该图展示了电影时长的分布情况。数据显示了绝大多数电影时长集中在90-120分钟区间（约1000-1500部），这符合商业电影的常规时长标准。150分钟以上的长片数量显著减少（约500部以下），而 50分钟以下的短片数量最少（几乎可以忽略不计）。\
+
+```{r }
+
+season_counts <- tv_shows %>%
+  filter(!is.na(duration)) %>%
+  group_by(duration) %>%
+  summarise(count = n()) %>%
+  arrange(duration)
+
+ggplot(season_counts, aes(x = factor(duration), y = count)) +
+  geom_bar(stat = "identity", fill = "darkred", alpha = 0.7) +
+  geom_text(aes(label = count), vjust = -0.5) +
+  labs(title = "剧集季数分布",
+       x = "季数",
+       y = "剧集数量",
+       caption = paste("总剧集数:", sum(season_counts$count))) +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"),
+        plot.caption = element_text(hjust = 1)) +
+  scale_x_discrete(breaks = seq(0, max(season_counts$duration), by = 1))
+```
+
+该图展示了单季剧集占比100%的分布模式，与真实的影视行业基本规律不符。推测有可能是数据采集的问题。\
+
+
+#### A-1.5 评分与分级分布分析
+
+```{r rating_and_score_analysis}
+
+ggplot(movies %>% 
+       filter(!is.na(rating_score), !is.na(duration), duration <= 200),  # 过滤掉异常长的电影
+       aes(x = duration, y = rating_score)) +
+  geom_point(alpha = 0.3, color = "steelblue") +
+  geom_smooth(method = "loess", color = "darkblue", fill = "darkblue", alpha = 0.2) +  # 修改趋势线的样式
+  labs(title = "电影时长与评分的关系",
+       x = "时长（分钟）",
+       y = "评分") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+```
+
+该图表显示：\
+
+-   60-120分钟区间：评分普遍较高（集中在7.5-8.5分），尤其是90-110分钟的影片呈现评分峰值，符合商业电影的最佳叙事时长规律。
+-   超长影片（\>150分钟）：评分波动较大，部分作品维持高分（如经典史诗片），但整体呈下降趋势，可能与观众耐心阈值有关。
+-   短片（\<60分钟）：评分分布分散，既有高分实验性作品，也有大量低分内容，反映短片质量参差不齐的特性。\
+
+平滑曲线（geom_smooth）整体呈现"倒U型"趋势，验证了适中时长更易获得好评的说法。\
+
+```{r }
+genre_rating <- movies %>%
+  separate_rows(genres, sep = ", ?") %>%
+  filter(!is.na(genres), !is.na(rating_score)) %>%
+  group_by(genres) %>%
+  summarise(avg_rating = mean(rating_score, na.rm = TRUE),
+            count = n()) %>%
+  filter(count >= 50) %>%  
+  arrange(desc(avg_rating)) %>%
+  head(10) 
+
+
+ggplot(genre_rating, aes(x = reorder(genres, avg_rating), y = avg_rating)) +
+  geom_bar(stat = "identity", fill = "darkred", alpha = 0.7) +
+  coord_flip() +
+  labs(title = "不同类型电影的平均评分（前10类型）",
+       x = "电影类型",
+       y = "平均评分") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+
+```
+
+不同类型电影的平均评分（前10类型）\
+
+该图展示了平均评分最高的10个电影类型及其评分分布：\
+
+-   动画（Animation）以显著优势位居榜首（评分接近6分），体现动画作品在叙事完整性和受众满意度上的稳定表现。\
+
+-   历史（History）与战争（War）类型紧随其后（约5.5分），反映严肃题材的深度制作易获专业认可。\
+
+-   音乐（Music）、家庭（Family）和奇幻（Fantasy）类型评分集中在4-5分区间，显示合家欢与超现实题材的稳定市场表现。\
+
+-   犯罪（Crime）与剧情（Drama）作为传统类型表现中规中矩（约4分），而电视电影（TVMovie）垫底（约2分），可能受限于电视媒介的制作预算。\
+
+
+
+```{r }
+
+ggplot(movies %>% filter(!is.na(rating_score_bin)), aes(x = rating_score_bin)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "电影评分分数分布",
+       x = "评分分数（1-10）",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+
+  该图展示了电影评分的分布规律：\
+  
+  - 呈现典型的"倒J型"分布，评分集中在6-8分区间（约4000-6000部）\
+  
+  - 峰值出现在7分位置（约6000部），显示大多数电影达到"良好"水平 \
+  
+  - 9分以上高分电影数量锐减（约1000部以下），10分作品极为罕见 \
+  
+  - 低分段（1-4分）数量显著少于中高分段，合计不足总量的15% \
+  
+  
+```{r }
+
+ggplot(tv_shows %>% filter(!is.na(rating_score_bin)), aes(x = rating_score_bin)) +
+  geom_bar(fill = "darkred") +
+  labs(title = "剧集评分分数分布",
+       x = "评分分数（1-10）",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+
+剧集评分分布与电影相似但存在差异：\
+
+  - 同样呈现右偏分布，但峰值更为平缓（7分约3000部） \
+  
+  - 高分段（8-9分）占比相对更高，显示剧集更易获得观众深度认可 \
+  
+  - 10分剧集数量明显多于电影（约1500部），反映剧集更容易培养忠实粉丝 \
+  
+  - 低分段（1-3分）数量占比更小，可能由于剧集试播机制过滤了劣质内容 \
+
+### A-2. 对比电影与剧集上线数量变化趋势
+
+```{r time_trend_analysis}
+
+yearly_content <- bind_rows(
+  movies %>%
+    group_by(release_year) %>%
+    summarise(count = n(), type = "电影"),
+  tv_shows %>%
+    group_by(release_year) %>%
+    summarise(count = n(), type = "剧集")
+)
+
+ggplot(yearly_content %>% filter(type == "电影"), 
+       aes(x = release_year, y = count)) +
+  geom_line(size = 1, color = "steelblue") +
+  geom_point(color = "steelblue") +
+  labs(title = "Netflix电影发布时间趋势",
+       x = "发布年份",
+       y = "电影数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti")) +
+  scale_x_continuous(breaks = seq(min(yearly_content$release_year), 
+                                max(yearly_content$release_year), 
+                                by = 5))
+
+```
+
+该图呈现了Netflix平台电影数量的年度变化情况：\
+
+ - 2020年达到1016部后增速明显放缓，2025年预计将达峰值1024部。\
+ 
+ - 虽然间中有小幅度回落，整体还是呈现温和上升趋势。\
+
+
+```{r }
+
+ggplot(yearly_content %>% filter(type == "剧集"), 
+       aes(x = release_year, y = count)) +
+  geom_line(size = 1, color = "darkred") +
+  geom_point(color = "darkred") +
+  labs(title = "Netflix剧集发布时间趋势",
+       x = "发布年份",
+       y = "剧集数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti")) +
+  scale_x_continuous(breaks = seq(min(yearly_content$release_year), 
+                                max(yearly_content$release_year), 
+                                by = 5))
+```
+
+
+该图显示了2010-2025年Netflix剧集发布数量的变化趋势：\
+
+ - 数量级几乎都是保持在1000部之间，波动幅度极小 \
+ - 趋势线几乎水平，表明剧集每年产量稳定保持 \
+
+
+### A-3. 分析不同维度的时间演化趋势
+
+```{r}
+language_analysis_movies <- movies %>%
+  mutate(year = year(date_added)) %>%
+  filter(!is.na(language)) %>%
+  group_by(year, language) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(rank = dense_rank(desc(count))) %>%
+  ungroup()
+
+top_languages_movies <- language_analysis_movies %>%
+  filter(rank <= 5) %>%
+  ggplot(aes(x = year, y = count, color = language)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "电影内容数量语言的年度趋势",
+       x = "年份",
+       y = "内容数量",
+       color = "语言") +
+  theme_minimal(base_family = "STHeiti")
+
+top_languages_movies
+
+```
+
+该图展示了电影内容数量语言的年度趋势（2010-2025）：\
+
+ - 语言排名上，英语（en）占了绝对主导，2025年接近600部，占总量的60%以上 \
+ - 西班牙语（es），法语（fr），韩语（ko）则是第二梯队，2025年约200-300部 \
+ - 2015-2020年为韩语（ko）快速增长阶段，2020年后放缓 \
+ - 中文（zh）数量较少但稳定增长 \
+
+
+```{r }
+language_analysis_tv_shows <- tv_shows %>%
+  mutate(year = year(date_added)) %>%
+  filter(!is.na(language)) %>%
+  group_by(year, language) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(rank = dense_rank(desc(count))) %>%
+  ungroup()
+
+top_languages_tv_shows <- language_analysis_tv_shows %>%
+  filter(rank <= 5) %>%
+  ggplot(aes(x = year, y = count, color = language)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "剧集内容数量语言的年度趋势",
+       x = "年份",
+       y = "内容数量",
+       color = "语言") +
+  theme_minimal(base_family = "STHeiti")
+
+top_languages_tv_shows
+
+```
+
+该折线图展示了：\
+
+  - 2010-2025年Netflix剧集内容中六种主要语言的年度分布趋势。英语（en）始终占据主导地位，2025年预计达300部。\
+ 
+  - 中文（zh）构成第二梯队，2025年分别约150部；日语（ja）和韩语（ko）跟随在后，2025年接近100部\
+ 
+  - 其他语言数量最少且增长平缓。值得注意的是，2015年后非英语内容增速明显提升，特别是中文内容在2020年后增长显著。
+
+
+```{r }
+movies <- movies %>%
+  mutate(year_added = year(date_added))
+
+genre_analysis_movies <- movies %>%
+  mutate(year = year(date_added)) %>%
+  separate_rows(genres, sep = ",") %>%
+  mutate(genres = str_trim(genres)) %>%
+  filter(!is.na(genres) & genres != "") %>%
+  group_by(year, genres) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(rank = dense_rank(desc(count))) %>%
+  ungroup()
+
+top_genres_movies <- genre_analysis_movies %>%
+  filter(rank <= 5) %>%
+  ggplot(aes(x = year, y = count, color = genres)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "电影内容数量的类型趋势",
+       subtitle = "TOP 5类型分布",
+       x = "年份",
+       y = "内容数量",
+       color = "类型") +
+  theme_minimal(base_family = "STHeiti") +
+  theme(plot.title = element_text(face = "bold"))
+
+
+movie_genre_year <- movies %>% 
+  separate_rows(genres, sep = ", ?") %>% 
+  group_by(year_added, genres) %>% 
+  summarise(n = n(),
+    .groups = "drop") %>% 
+  filter(!is.na(year_added), !is.na(genres))
+
+
+top_genres_movies
+```
+该图展示了:
+  - 剧情片类型票房在 2010 至 2015 年间显著上升，达到约 500 百万，但随后逐渐下降
+  - 喜剧片类型票房在 2020 年左右出现短暂高峰，随后回落
+  - 其他类型如 动画片,科幻奇幻片和动作冒险片 则呈现票房相对稳定增长。
+
+```{r }
+
+tv_shows <- tv_shows %>%
+  mutate(year_added = year(date_added))
+
+genre_analysis_tv_shows <- tv_shows %>%
+  mutate(year = year(date_added)) %>%
+  # 拆分复合类型(如"喜剧,剧情"拆分为多行)
+  separate_rows(genres, sep = ",") %>%
+  mutate(genres = str_trim(genres)) %>%
+  filter(!is.na(genres) & genres != "") %>%
+  group_by(year, genres) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(rank = dense_rank(desc(count))) %>%
+  ungroup()
+
+top_genres_tv_shows <- genre_analysis_tv_shows %>%
+  filter(rank <= 5) %>%
+  ggplot(aes(x = year, y = count, color = genres)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "剧集内容数量的类型趋势",
+       subtitle = "TOP 5类型分布",
+       x = "年份",
+       y = "内容数量",
+       color = "类型") +
+  theme_minimal(base_family = "STHeiti") +
+  theme(plot.title = element_text(face = "bold"))
+
+top_genres_tv_shows
+
+```
+
+从图中可以观察到的主要趋势包括：\
+
+  - 剧情片在整个时期内内容数量始终最高，从2010年的约400部显著增长到2023年的超过600部，随后在2025年略有下降。\
+  
+  - 喜剧片通常保持第二高的内容数量，多年来在250到350之间波动，在2015年左右有一个明显的峰值。\
+  
+  - 动作冒险和真人秀类型显示出一定的增长，特别是从2020年开始，其中真人秀在2025年之前呈现更陡峭的增长。\
+  
+
+### A-4. 分级特征分析
+
+```{r}
+movies_duration_summary <- movies %>%
+  filter(!is.na(duration)) %>% 
+  group_by(rating_score_bin) %>%
+  summarise(
+    avg_duration = mean(duration, na.rm = TRUE),
+    sd_duration = sd(duration, na.rm = TRUE),
+    count = n()
+  )
+
+
+movies_duration_plot <- ggplot(movies_duration_summary, aes(x = as.factor(rating_score_bin), y = avg_duration)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_errorbar(aes(ymin = avg_duration - sd_duration, ymax = avg_duration + sd_duration), width = 0.2) +
+  labs(
+    title = "电影各分级的平均时长（分钟）",
+    x = "分级",
+    y = "平均时长（分钟）"
+  ) +
+  theme_minimal() +
+  theme_minimal(base_family = "STHeiti")
+
+print(movies_duration_plot)
+```
+
+该图展示了不同电影分级的平均时长（分钟）：
+  - 从图上看，分级1的平均时长接近100分钟。随着分级的增加，平均时长似乎有增长的趋势，例如分级10的平均时长最高，接近140分钟。NA分级的平均时长则显著低于其他分级，大约在80分钟左右，且其波动范围也较大。
+
+```{r }
+movies_duration_boxplot <- ggplot(movies %>% filter(!is.na(duration)), aes(x = as.factor(rating_score_bin), y = duration)) +
+  geom_boxplot(fill = "#2196F3", outlier.colour = "red") +
+  labs(
+    title = "电影各分级的时长（分钟）分布",
+    x = "分级",
+    y = "时长（分钟）"
+  ) +
+  theme_minimal() +
+  theme_minimal(base_family = "STHeiti")
+
+print(movies_duration_boxplot)
+```
+
+该箱线图（盒须图）展示了不同电影分级的时长（分钟）分布情况： \ 
+
+  - 分级1、2、3的箱体都比较扁平且中位数接近100分钟，表明这些分级的电影时长相对集中且较短。\
+  
+  - 随着分级的增加，箱体的上下边缘（四分位数范围）通常会变宽，并且中位数有向上移动的趋势，说明电影时长分布更广且中位数更长\
+  
+  - 分级越高，电影时长的中位数越高，且时长分布的范围通常更广，也更容易出现超长电影。\
+  
+  
+  
+```{r}
+movies_genres_split <- movies %>%
+  separate_rows(genres, sep = ",\\s*") %>%
+  filter(genres != "")
+
+top_10_genres <- movies_genres_split %>%
+  count(genres, sort = TRUE) %>%
+  head(10) %>%
+  pull(genres)
+
+movies_genres_split_top_10 <- movies_genres_split %>%
+  filter(genres %in% top_10_genres)
+
+movies_genres_summary_top_10 <- movies_genres_split_top_10 %>%
+  group_by(rating_score_bin, genres) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(rating_score_bin) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+ggplot(movies_genres_summary_top_10, aes(x = as.factor(rating_score_bin), y = percentage, fill = genres)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "电影各分级的类型分布 (Top 10 类型)",
+       x = "分级 (rating_score_bin)",
+       y = "百分比 (%)",
+       fill = "类型") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+
+该图表展示了电影在不同评分分级（1-10分）下的类型占比分布，涵盖动作、冒险、动画等Top 10类型。数据显示，喜剧（Comedy）和剧情片（Drama）在各评分段占比均衡，是中低分段（3-6分）的主力类型；而高分段（8-10分）则被动作（Action）、冒险（Adventure）和惊悚片（Thriller）主导，反映大制作影片更易获得高评价。动画（Animation）和家庭片（Family）在中等评分区（5-7分）表现突出，而恐怖片（Horror）集中于低分段（1-4分），体现类型与观众评分的显著关联。无分级（NA）影片以剧情类和纪录片为主，符合其特殊属性。整体来看，电影类型与评分分布呈现明确规律：高成本类型更易获高分，而小众类型则呈现两极分化趋势。
+
+  -
+
+```{r }
+
+tv_genres_split <- tv_shows %>%
+  separate_rows(genres, sep = ",\\s*") %>%
+  filter(genres != "")
+
+top_10_tv_genres <- tv_genres_split %>%
+  count(genres, sort = TRUE) %>%
+  head(10) %>%
+  pull(genres)
+
+tv_genres_split_top_10 <- tv_genres_split %>%
+  filter(genres %in% top_10_tv_genres)
+
+
+tv_genres_summary_top_10 <- tv_genres_split_top_10 %>%
+  group_by(rating_score_bin, genres) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(rating_score_bin) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+ggplot(tv_genres_summary_top_10, aes(x = as.factor(rating_score_bin), y = percentage, fill = genres)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "电视节目各分级的类型分布 (Top 10 类型)",
+       x = "分级 (rating_score_bin)",
+       y = "百分比 (%)",
+       fill = "类型") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+
+```
+该图表展示了电视节目在不同分级（1-10分及NA）下的类型分布情况，统计了包括动作冒险、动画、喜剧、犯罪等Top 10类型的占比。整体来看，喜剧（Comedy）和剧情类（Drama）在多数分级中占据较高比例，尤其在中等评分段（如4-7分）表现突出；而动作冒险（Action & Adventure）和科幻奇幻（Sci-Fi & Fantasy）类型则在高分段（8-10分）占比显著提升，可能反映观众对高质量特效与叙事作品的青睐。NA（无分级）部分以纪录片（Documentary）和真人秀（Reality）为主，符合其非虚构特性。总结而言，类型偏好与节目分级存在明显关联，高分级节目更倾向大制作类型，而中低分段则以传统喜剧和剧情片为主导。
+
+### A-5. 上线延迟分析
+
+
+```{r delay_analysis}
+
+movies$release_year <- as.numeric(movies$release_year)
+tv_shows$release_year <- as.numeric(tv_shows$release_year)
+movies$delay <- movies$year_added - movies$release_year
+tv_shows$delay <- tv_shows$year_added - tv_shows$release_year
+
+
+ggplot(movies %>% filter(!is.na(delay)), aes(x = delay)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  labs(title = "电影上线延迟分布",
+       x = "延迟（年）",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+
+```{r }
+
+ggplot(tv_shows %>% filter(!is.na(delay)), aes(x = delay)) +
+  geom_histogram(bins = 30, fill = "darkred", alpha = 0.7) +
+  labs(title = "剧集上线延迟分布",
+       x = "延迟（年）",
+       y = "数量") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti"))
+```
+
+### A-6. 季节性分析
+
+```{r seasonality_analysis}
+
+movies <- movies %>%
+  mutate(month_added = month(date_added))
+
+tv_shows <- tv_shows %>%
+  mutate(month_added = month(date_added))
+
+
+monthly_stats <- bind_rows(
+  movies %>%
+    group_by(month_added) %>%
+    summarise(count = n(), type = "电影"),
+  tv_shows %>%
+    group_by(month_added) %>%
+    summarise(count = n(), type = "剧集")
+)
+
+
+ggplot(monthly_stats, aes(x = month_added, y = count, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  labs(title = "内容添加月度分布",
+       x = "月份",
+       y = "数量",
+       fill = "内容类型") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti")) +
+  scale_fill_manual(values = c("电影" = "steelblue", "剧集" = "darkred"))
+```
+
+该图表展示了剧集和电影内容在不同月份的添加数量: \
+
+  - 剧集在一月有显著的添加高峰（超过2000部），随后在四月至六月有所下降，并在十月再次小幅回升，但年末（十一月和十二月）降至全年最低。 \
+  - 相比之下，电影在一月数量相对较低，但在夏季末至秋季（八月和九月）达到添加高峰（九月接近1800部），并在年末保持相对稳定 \   
+  - 整体而言，剧集更偏向于年初和秋初的爆发性发布，而电影则呈现出更明显的年中到年末的上线高峰。\
+  
+
+```{r }
+
+quarterly_stats <- bind_rows(
+  movies %>%
+    mutate(quarter = ceiling(month_added/3)) %>%
+    group_by(quarter) %>%
+    summarise(count = n(), type = "电影"),
+  tv_shows %>%
+    mutate(quarter = ceiling(month_added/3)) %>%
+    group_by(quarter) %>%
+    summarise(count = n(), type = "剧集")
+)
+
+
+ggplot(quarterly_stats, aes(x = quarter, y = count, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_continuous(breaks = 1:4, labels = c("Q1", "Q2", "Q3", "Q4")) +
+  labs(title = "内容添加季度分布",
+       x = "季度",
+       y = "数量",
+       fill = "内容类型") +
+  theme_minimal() +
+  theme(text = element_text(family = "STHeiti")) +
+  scale_fill_manual(values = c("电影" = "steelblue", "剧集" = "darkred"))
+```
+
+
+该图表展示了内容添加的季度分布，比较了剧集和电影在四个季度（Q1、Q2、Q3、Q4）的上线数量。\
+
+  - 从图中可以看出，剧集在第一季度（Q1）达到全年添加高峰，数量超过5000部，但在第二季度（Q2）显著下降，随后在第三季度（Q3）有所回升，第四季度（Q4）保持与第三季度相近的水平。 \
+  
+  - 而电影的添加量则相对稳定，除了第一季度略低于剧集外，在第二、三、四季度均高于剧集，尤其在第四季度（Q4）达到全年最高，数量超过4500部。\
+  
+  - 总体而言，剧集倾向于在年初集中发布，而电影则在全年分布相对均匀，并在年末有更强的表现。\
+
+## B：IMDb 电影评分、票房与创作因素分析
+
+IMDb电影的数据清洗
+```{r }
+
+imdb_combined_data <- read.csv("combined_movies_data.csv", stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+
+imdb_cleaned_data <- imdb_combined_data %>%
+  transmute(
+    imdb_title = Title,
+    imdb_year = suppressWarnings(as.numeric(Year)),
+    imdb_duration = sapply(Duration, function(x) {
+      if(is.na(x)) return(NA)
+      hours <- as.numeric(str_extract(x, "\\d+(?=h)"))  
+      mins <- as.numeric(str_extract(x, "\\d+(?=m)"))   
+      if(is.na(hours)) hours <- 0
+      if(is.na(mins)) mins <- 0
+      return(hours * 60 + mins)  
+    }),
+    imdb_mpa  = ifelse(trimws(Rating) == "", NA, 
+                   toupper(trimws(Rating))),
+    imdb_rating = suppressWarnings(as.numeric(Rating)),
+    imdb_votes = suppressWarnings(
+      ifelse(grepl("k$", Votes, ignore.case = TRUE),  
+      as.numeric(gsub("[^0-9.]", "", Votes)) * 1000, 
+      as.numeric(gsub(",", "", Votes))  
+    )),
+    imdb_meta_score = suppressWarnings(as.numeric(méta_score)),
+    imdb_description = description,
+    imdb_writers = gsub("[^a-zA-Z0-9,]", "", writers), 
+    imdb_directors = gsub("[^a-zA-Z0-9,]", "", directors), 
+    imdb_stars = gsub("[^a-zA-Z0-9,]", "", stars),
+    imdb_budget = ifelse(grepl("^\\$", budget), 
+                   suppressWarnings(as.numeric(gsub("[^0-9]", "", budget))), 
+                   NA),
+    imdb_opening_weekend_gross = ifelse(grepl("^\\$", opening_weekend_Gross), 
+                                 suppressWarnings(as.numeric(gsub("[^0-9]", "", opening_weekend_Gross))), 
+                                 NA),
+    imdb_gross_worldwide = ifelse(grepl("^\\$", grossWorldWWide), 
+                           suppressWarnings(as.numeric(gsub("[^0-9]", "", grossWorldWWide))), 
+                           NA),
+    imdb_gross_us_canada = ifelse(grepl("^\\$", gross_US_Canada), 
+                           suppressWarnings(as.numeric(gsub("[^0-9]", "", gross_US_Canada))), 
+                           NA),
+    imdb_release_date = release_date,
+    imdb_countries_origin = gsub("[^a-zA-Z0-9,]", "", countries_origin),
+    imdb_filming_locations = gsub("[^a-zA-Z0-9,]", "", filming_locations),
+    imdb_production_company = gsub("[^a-zA-Z0-9,]", "", production_company),
+    imdb_awards_content = gsub("[^a-zA-Z0-9,]", "", awards_content),
+    imdb_genres = gsub("[^a-zA-Z0-9,]", "", genres),
+    imdb_languages = gsub("[^a-zA-Z0-9,]", "", Languages),
+    imdb_oscar_winner = grepl("won \\d+ oscar|won oscar", awards_content, ignore.case = TRUE),
+    imdb_golden_globe_winner = grepl("won \\d+ golden globe|won golden globe", awards_content, ignore.case = TRUE),
+    imdb_main_cast = sapply(str_split(imdb_stars, ","), function(x) {
+      if (length(x) == 0 || all(x == "") || all(is.na(x))) return(NA_character_)
+      paste(head(trimws(x), 2), collapse = ",")  
+    })
+    
+  )
+
+write.csv(imdb_cleaned_data, 
+          file = "combined_cleaned.csv",  
+          row.names = FALSE,               
+          fileEncoding = "UTF-8",          
+          quote = TRUE)                    
+
+theme_set(theme_minimal() + 
+          theme(text = element_text(family = "STHeiti")))
+```
+
+### B-1. 分析 IMDb 评分（Rating）、评分人数（Votes）、meta_score 的分布结构，并按类型、国家分类比较
+
+```{r }
+
+imdb_rating_hist <- ggplot(imdb_cleaned_data %>% filter(!is.na(imdb_rating)), 
+                          aes(x = imdb_rating)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  labs(title = "IMDb 评分分布 (有效数据)",
+       x = "评分",
+       y = "电影数量") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+
+imdb_rating_hist
+```
+
+  \
+
+从图中可以看出，IMDb评分呈近似正态分布，但略微偏向高分。大部分电影的评分集中在5.5到7.5分之间，其中6.5分左右的电影数量最多，超过1000部。评分低于4.0分或高于8.5分的电影数量相对较少，表明绝大多数电影的评分都处于中等偏上的水平。这反映了IMDb平台上电影评分的总体趋势，即大众更倾向于给出中等偏高的评价。\
+
+```{r }
+
+imdb_votes_hist <- ggplot(imdb_cleaned_data %>% filter(!is.na(imdb_votes)), 
+                     aes(x = imdb_votes)) +
+  geom_histogram(bins = 30, fill = "darkred", alpha = 0.7) +
+  scale_x_log10(
+    labels = scales::comma,
+    breaks = 10^(0:6)  
+  ) +
+  labs(title = "IMDb 评分人数分布（对数刻度，有效数据）",
+       x = "评分人数（对数）",
+       y = "电影数量") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "STHeiti"),
+    plot.caption = element_text(color = "gray50", size = 8)
+  )
+
+
+imdb_votes_hist
+
+```
+
+\
+
+从图中可以看出，大多数电影的评分人数集中在1,000人到100,000人之间。其中，评分人数在5,000人到10,000人左右的电影数量最多，超过600部。随着评分人数的增加或减少，电影数量逐渐减少。这表明IMDb上大部分电影都获得了中等偏高数量的投票，而极少有电影只有极少数人评分或有上百万甚至更多人评分。 \ 
+
+
+```{r }
+
+imdb_meta_score_hist <- ggplot(imdb_cleaned_data, aes(x = imdb_meta_score)) +
+  geom_histogram(bins = 30, fill = "seagreen", alpha = 0.7, na.rm = TRUE) +
+  labs(title = "IMDb Meta Score分布",
+       x = "评分分数（0-100）",
+       y = "电影数量") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_meta_score_hist
+```
+
+从图中可以看出，Meta Score的分布呈大致正态分布，但略微偏向高分。大部分电影的Meta Score集中在60到80分之间，其中65分到75分左右的电影数量最多，有近600部。评分低于25分或高于90分的电影数量非常少，表明大多数电影的Meta Score都处于中等偏上的区间。 \ 
+
+```{r }
+
+imdb_rating_votes_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_rating, y = imdb_votes)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+  scale_y_log10(labels = scales::comma) +
+  labs(title = "评分与评分人数的关系",
+       x = "评分",
+       y = "评分人数（對数）") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_rating_votes_scatter
+
+
+
+```
+
+该图展示了评分与评分人数呈非线性分布：中等评分作品（5-7.5分）的评分人数最多（集中在1,000-10,000区间），而极高（9分以上）和极低分（3分以下）作品的评分人数显著减少。部分低分作品（约2.5-4分）出现评分人数异常高的离群点，可能源于内容引发的两极评价。整体表明，观众更倾向于为中等质量作品评分，极高/低分作品或因小众属性或选择偏差导致参与度下降。
+
+```{r }
+
+imdb_meta_rating_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_meta_score, y = imdb_rating)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "blue", na.rm = TRUE) +
+  labs(title = "meta_score 与评分的关系",
+       x = "meta_score",
+       y = "评分") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_meta_rating_scatter
+```
+
+该散点图展示了meta_score与用户评分的关系。meta_score越高，用户评分总体越高，但存在明显分散性。当meta_score在75分以上时，用户评分多集中在7.5-10分区间；而meta_score低于50分的作品，用户评分分布广泛（2.5-7.5分）。专业评价与大众观感差异可能随作品质量下降而增大。部分低meta_score（<30）作品仍获得较高用户评分（>7.5），这可能是因为"烂番茄"式评价分裂现象。
+
+
+```{r}
+imdb_genre_rating_box <- imdb_cleaned_data %>%
+  separate_rows(imdb_genres, sep = ",") %>%
+  mutate(imdb_genres = trimws(imdb_genres)) %>%  
+  group_by(imdb_genres) %>%
+  filter(n() >= 50) %>%  
+  summarise(median_rating = median(imdb_rating, na.rm = TRUE)) %>%
+  arrange(desc(median_rating)) %>%
+  head(10) %>%  
+  left_join(imdb_cleaned_data %>% 
+             separate_rows(imdb_genres, sep = ",") %>%
+             mutate(imdb_genres = trimws(imdb_genres)),
+           by = "imdb_genres") %>% 
+  ggplot(aes(x = reorder(imdb_genres, median_rating), y = imdb_rating)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.8, na.rm = TRUE) +
+  coord_flip() +
+  labs(title = "评分与评分最高的10种电影类型的关系",
+       x = "电影类型",
+       y = "IMDB评分") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10))
+
+imdb_genre_rating_box
+```
+
+该图数据显示了Epic和纪实剧（Docudrama）的中位数评分最高（约7.5分以上），且分布集中；而成人动画（AdultAnimation）和新闻类（News）评分波动较大。整体来看，非虚构类型（如纪录片、传记）普遍评分高于虚构类，但史诗类作为例外在虚构类型中表现突出。这反映了观众对真实故事和高质量叙事作品的偏好，而小众类型（如成人动画）则呈现评价两极分化现象。
+
+```{r}
+
+
+top_countries <- imdb_cleaned_data %>%
+  separate_rows(imdb_countries_origin, sep = ",") %>%
+  mutate(imdb_countries_origin = trimws(imdb_countries_origin)) %>%
+  count(imdb_countries_origin, sort = TRUE) %>%
+  head(10) %>%
+  pull(imdb_countries_origin)
+
+
+imdb_cleaned_data %>%
+  separate_rows(imdb_countries_origin, sep = ",") %>%
+  mutate(country = trimws(imdb_countries_origin)) %>%
+  filter(country %in% top_countries) %>%
+  ggplot(aes(x = reorder(imdb_countries_origin, imdb_rating, median), 
+             y = imdb_rating)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, na.rm = TRUE) +
+  coord_flip() +
+  labs(title = "不同国家电影评分比较",
+       x = "国家",
+       y = "IMDB评分") +
+  theme_minimal(base_family = "STHeiti")
+
+
+```
+
+该图数据显示了英国和比利时电影的中位数评分最高，且分布集中；印度电影评分波动最大（从3分到9分），反映其产量大且质量参差；
+日本电影评分分布呈现右偏，显示其作品的评分普遍较高。美国作为产量最大的国家，评分中位数处于中游水平，与其商业片主导的市场特征相符。
+整体来看，欧洲国家（英、比、德、法）的电影评分稳定性与质量表现最优，而亚洲国家则呈现更大的评价差异。
+
+
+### B-2. 探索 budget、grossWorldwide、gross_US_Canada 与作品评分、受欢迎程度之间的相关性或回归关系
+
+```{r }
+
+imdb_gross_rating_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_rating, y = imdb_gross_worldwide)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+  scale_y_log10(labels = scales::dollar) +
+  labs(title = "全球票房与评分的关系",
+       x = "评分",
+       y = "全球票房（对数）") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+
+imdb_gross_rating_scatter
+
+```
+
+该图数据展示了电影评分与全球票房，两者呈弱正相关。中等评分影片（6-8分）贡献了最多高票房作品，而极高评分（>9分）影片因多为小众艺术片，票房集中在1000万以下；部分低分（<4分）影片仍能获得超高票房（>1亿）。票房在1亿以上的作品评分全部集中在5.5-8.5分区间，表明商业成功需要基本质量保证。
+
+```{r }
+
+imdb_budget_gross_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_budget, y = imdb_gross_worldwide)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "red") +
+  scale_x_log10(labels = scales::dollar) +
+  scale_y_log10(labels = scales::dollar) +
+  labs(title = "预算与全球票房的关系",
+       x = "预算（对数）",
+       y = "全球票房（对数）") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+imdb_budget_gross_scatter
+
+```
+
+该图数据显示了预算与票房呈现明显正比关系，高预算（>$1亿）电影普遍获得更高票房。
+当预算超过1亿美元时，票房方差急剧增大，说明了超高预算风险与收益并存。
+少数影片还是可以中等预算（$1000万-$5000万）实现票房突破，这说明了人们愿意因为内容质量好而消费。
+
+
+
+### B-3. 分析导演、主演、编剧等创作人员对评分与票房的影响（如计算导演历史平均得分）
+```{r}
+
+director_avg_rating <- imdb_cleaned_data %>%
+  filter(!is.na(imdb_directors), 
+         !is.na(imdb_rating),
+         imdb_directors != "") %>%  
+  
+
+  separate_rows(imdb_directors, sep = ",\\s*") %>%
+  mutate(director = trimws(imdb_directors)) %>%  
+  
+
+  group_by(director) %>%
+  summarise(
+    movie_count = n(),
+    avg_rating = mean(imdb_rating, na.rm = TRUE),
+    rating_sd = sd(imdb_rating, na.rm = TRUE)
+  ) %>%
+  filter(movie_count >= 5) %>%  
+  arrange(desc(avg_rating))
+
+
+director_avg_rating %>%
+  head(10) %>%
+  mutate(director = fct_reorder(director, avg_rating)) %>%
+  ggplot(aes(x = avg_rating, y = director, 
+             size = movie_count, color = rating_sd)) +
+  geom_point(alpha = 0.8) +
+  scale_size(range = c(3, 8), name = "作品数量") +
+  scale_color_gradient(low = "#1a9641", high = "#d7191c", 
+                      name = "评分波动") +
+  labs(title = "导演历史平均得分TOP10",
+       subtitle = "仅包含5部作品以上的导演",
+       x = "IMDB平均评分", 
+       y = NULL) +
+  theme_minimal(base_family = "STHeiti") +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(size = 10))
+```
+
+这张图展示了作品超过5部的导演评分TOP10：  
+
+1. 顶尖导演表现
+   - Christopher Nola 以约8.2分的平均分位居榜首，且评分波动较小（0.4左右），体现其稳定的高质量输出。  
+   - Peter Jackson、Denis Villeneuve 等商业片导演紧随其后，评分均超7.8分，验证了商业与口碑的双赢可能。  
+
+2. 作品数量与质量的关系
+   - 上榜导演的作品数集中在5-8部之间，显示“少而精”的创作模式更易获得高口碑。  
+
+3. 评分波动差异
+   - James Gunn等导演的评分标准差较高，反映其作品风格或受众评价两极分化。  
+   - Martin Scorsese 等老牌导演波动更低，体现其稳定的作者性表达。  
+
+顶级导演需平衡产量与质量，稳定性（低波动）才能长期保持高口碑。
+
+
+```{r }
+
+actor_avg_rating <- imdb_cleaned_data %>%
+  separate_rows(imdb_main_cast, sep = ",\\s*") %>%
+  filter(!is.na(imdb_main_cast), 
+         !is.na(imdb_rating),
+         imdb_main_cast != "") %>%
+  mutate(actor = trimws(imdb_main_cast)) %>%  
+
+  group_by(imdb_main_cast) %>%
+  summarise(
+    movie_count = n(),              
+    avg_rating = mean(imdb_rating, na.rm = TRUE),  
+    rating_sd = sd(imdb_rating, na.rm = TRUE)      
+  ) %>%
+  filter(movie_count >= 5) %>%        
+  arrange(desc(avg_rating))          
+
+actor_avg_rating %>%
+  head(10) %>%
+  mutate(actor = fct_reorder(imdb_main_cast, avg_rating)) %>%
+  ggplot(aes(x = avg_rating, y = actor, 
+             size = movie_count, color = rating_sd)) +
+  geom_point(alpha = 0.8) +
+  scale_size(range = c(3, 8), name = "作品数量") +
+  scale_color_gradient(low = "steelblue", high = "#d7191c", name = "评分波动") +
+  labs(
+    title = "演员历史平均得分TOP10",
+    subtitle = "仅包含参演5部电影以上的演员",
+    x = "IMDB平均评分", 
+    y = NULL
+  ) +
+  theme_minimal(base_family = "STHeiti") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text.y = element_text(size = 10)
+  )
+
+```
+
+这张图展示了作品超过5部的演员评分TOP10：  
+1.高分演员特征  
+   - Sushant Singh Rajput以7.7分位居榜首，但评分波动最大（0.9），反映作品口碑两极分化  
+   - Leonardo DiCaprio（7.6分）和Ian McKellen（7.5分）表现稳定（波动<0.5），验证其选片严谨性  
+   - 新生代演员Timothée Chalamet和Jacob Tremblay跻身榜单，显示年轻演员的潜力  
+
+2. 关键发现  
+   - 作品数量与评分无直接关联：上榜演员参演5-10部电影，说明质量优于产量  
+   - 演员维持高口碑需平衡：7.5分以上平均分+低于0.5的评分波动，如商业片演员（如DiCaprio）需通过精选剧本保持艺术性。
+   
+```{r}
+
+writer_avg_rating <- imdb_cleaned_data %>%
+  separate_rows(imdb_writers, sep = ",\\s*") %>%
+  filter(!is.na(imdb_writers), 
+         !is.na(imdb_rating),
+         imdb_writers != "") %>%
+  mutate(writer = trimws(imdb_writers)) %>%  
+
+  group_by(writer) %>%
+  summarise(
+    movie_count = n(),                
+    avg_rating = mean(imdb_rating, na.rm = TRUE),  
+    rating_sd = sd(imdb_rating, na.rm = TRUE)     
+  ) %>%
+  filter(movie_count >= 5) %>%        
+  arrange(desc(avg_rating))          
+
+
+writer_avg_rating %>%
+  head(10) %>%
+  mutate(writer = fct_reorder(writer, avg_rating)) %>%
+  ggplot(aes(x = avg_rating, y = writer, 
+             size = movie_count, color = rating_sd)) +
+  geom_point(alpha = 0.8) +
+  scale_size(range = c(3, 8), name = "作品数量") +
+  scale_color_gradient(low = "steelblue", high = "#d7191c", name = "评分波动") +
+  labs(
+    title = "编剧历史平均得分TOP10",
+    subtitle = "仅参与5部电影以上的编剧",
+    x = "IMDB平均评分", 
+    y = NULL
+  ) +
+  theme_minimal(base_family = "STHeiti") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text.y = element_text(size = 10),
+    legend.position = "bottom"
+  )
+```
+
+这张图展示了作品超过5部的编剧评分TOP10： 
+
+1. 核心数据特征
+- Christopher Nolan 以最高评分领跑，配合0.25的低波动值，展现其剧本质量与稳定性双优
+- 作品数量跨度显著（5-15部），印度编剧Vijayendra Prasad以高产入围，而Cline Sciamma仅5部作品即上榜
+
+2.  行业启示
+- 从数据上来看，顶级编剧平均需保持7.5分基准线，并通过<0.5的波动值才能证明其专业性质量高
+
+
+### B-4. 研究获奖信息（如奥斯卡/金球奖）是否对 IMDb 评分或票房形成显著差异
+
+```{r }
+
+imdb_oscar_rating_box <- ggplot(imdb_cleaned_data, aes(x = factor(imdb_oscar_winner), y = imdb_rating)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, na.rm = TRUE) +
+  labs(title = "奥斯卡获奖与评分关系",
+       x = "是否获奖",
+       y = "评分") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_oscar_rating_box
+
+```
+
+该图数据显示，获奖影片的中位数评分显著高于未获奖影片，表明奥斯卡奖确实筛选出了整体质量更高的作品。
+部分未获奖影片评分与获奖作品存在重叠区间，显示少数高质量作品可能因竞争激烈或题材偏好未能获奖。
+极端低分仅出现在未获奖组，印证了"奥斯卡光环"的可信度。  
+
+
+```{r }
+imdb_golden_globe_rating_box <- ggplot(imdb_cleaned_data, aes(x = factor(imdb_golden_globe_winner), y = imdb_rating)) +
+  geom_boxplot(fill = "darkred", alpha = 0.7, na.rm = TRUE) +
+  labs(title = "金球奖获奖与评分关系",
+       x = "是否获奖",
+       y = "评分") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_golden_globe_rating_box
+```
+
+该图数据显示金球奖与影片评分关系： 
+
+1. 核心差异  
+   - 获奖影片评分中位数，显著高于未获奖影片。而未获奖组则存在更多低分异常值
+
+2. 行业特征  
+   - 推测金球奖获奖线与奥斯卡相比门槛略低  
+
+
+```{r }
+imdb_awards_gross_box <- imdb_cleaned_data %>%
+  mutate(imdb_has_award = imdb_oscar_winner | imdb_golden_globe_winner) %>%
+  ggplot(aes(x = factor(imdb_has_award), y = imdb_gross_worldwide)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, na.rm = TRUE) +
+  scale_y_log10(labels = scales::dollar) +
+  labs(title = "获奖与全球票房的关系",
+       x = "是否获奖",
+       y = "全球票房（对数）") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_awards_gross_box
+```
+
+该图数据显示获奖影片的票房溢价效应关系：
+
+1. 票房差距
+   - 获奖影片票房中位数是未获奖影片的数倍  
+
+2. 市场规律  
+   - 获奖标签可使中小成本影片票房  
+   - 但超高预算影片获奖与否对票房影响有限，反映商业大片自带流量属性  
+
+
+### B-5. 分析片长与评分/票房之间是否存在"最佳长度区间"
+
+```{r }
+imdb_duration_rating_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_duration, y = imdb_rating)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+  labs(title = "片长与评分的关系",
+       x = "片长（分钟）",
+       y = "评分") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+imdb_duration_rating_scatter
+
+```
+
+该图数据显示电影时长与评分的关系：
+1. 趋势  
+   - 短于90分钟的影片评分两极分化明显
+   - 90-150分钟集中了最高评分，符合主流叙事的最佳时长  
+   - 超长影片（>180分钟）评分稳定在7分以上，但数量稀少
+   - 商业片最佳时长：120±15分钟，院线电影建议控制2小时内左右
+
+```{r }
+
+imdb_duration_gross_scatter <- ggplot(imdb_cleaned_data, aes(x = imdb_duration, y = imdb_gross_worldwide)) +
+  geom_point(alpha = 0.5, na.rm = TRUE,color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+  scale_y_log10(labels = scales::dollar) +
+  labs(title = "片长与全球票房的关系",
+       x = "片长（分钟）",
+       y = "全球票房（对数）") +
+  theme_minimal() + 
+  theme(text = element_text(family = "STHeiti"))
+
+
+imdb_duration_gross_scatter
+
+```
+
+该图数据显示电影时长与票房表现的关系：
+
+图表分析：电影时长与票房表现的关系  
+
+1. 发现  
+   - 票房峰值出现在100-130分钟区间（商业片标准时长）
+   - 低于80分钟的影片票房普遍＜$1,000万，但动画/恐怖类型存在例外  
+   - 超长影片（＞150分钟）呈现两极分化
+   - 主流商业片最好控制在2小时±10分钟  
+   - 系列电影终章可突破150分钟（粉丝容忍度高）  
+   - 短片（＜75分钟）更适合作为流媒体附加内容而非独立发行  
+
+
+## C：TMDB 与 IMDb 数据整合与跨平台对比
+
+### C-1. 使用 title + release_year 为关键主键进行数据 inner join 合并，仅限于 Netflix 电影（netflix_movies_detailed_up_to_2025）  
+```{r}
+
+movies <- read.csv("netflix_movies_detailed_up_to_2025.csv", stringsAsFactors = FALSE)
+imdb <- read.csv("combined_cleaned.csv", stringsAsFactors = FALSE)
+
+
+movies <- movies %>%
+  mutate(
+    date_added = parse_date_time(date_added, orders = c("mdy", "ymd", "dmy", "Y-m-d"), quiet = TRUE),
+    title_clean = tolower(trimws(title)),
+    release_year = as.numeric(release_year)
+  ) %>%
+  filter(!is.na(title_clean), !is.na(release_year), !is.na(date_added))
+
+imdb <- imdb %>%
+  mutate(
+    title_clean = tolower(trimws(imdb_title)), 
+    release_year = as.numeric(str_extract(imdb_release_date, "\\d{4}$")) 
+  ) %>%
+  filter(!is.na(title_clean), !is.na(release_year))
+
+merged_data <- inner_join(
+  movies %>% select(title_clean, release_year, popularity, genres, duration, main_country, language, date_added),
+  imdb %>% select(title_clean, release_year, imdb_rating, imdb_votes, imdb_gross_worldwide, imdb_budget),
+  by = c("title_clean", "release_year")
+)
+
+merged_data <- merged_data %>%
+  distinct(title_clean, release_year, .keep_all = TRUE)
+
+print(head(merged_data))
+```
+
+### C-2. 对比两个平台中相同作品在 popularity（TMDB）与 Rating/Votes（IMDb）等指标上的表现差异  
+
+```{r platform_comparison}
+
+  ggplot(merged_data, aes(x = popularity, y = imdb_rating)) +
+    geom_point(alpha = 0.5, color = "steelblue", na.rm = TRUE) +
+    geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+    labs(title = "TMDB Popularity vs. IMDb Rating", 
+         x = "TMDB Popularity", 
+         y = "IMDb Rating") +
+    theme_minimal() +
+    theme(text = element_text(family = "STHeiti"))
+```
+
+该图表揭示了TMDB热度与IMDb评分的非线性关系：
+
+1. 趋势  
+   - 存在弱正相关：TMDB热度高的作品在IMDb通常获得6-8分中等评分，但极少达到9分以上  
+   - TMDB更偏爱新上映作品  
+   - IMDb评分更"保守"：7.5分以上仅占12%，而TMDB前20%热度作品占总量35%  
+   - 目标全球市场需同时关注两平台：TMDB热度预测短期流量，IMDb评分反映长期口碑  
+   - 投票数>3000的作品分布更集中，说明大众评价趋于一致时，两平台指标相关性增强  
+
+
+```{r }
+
+  ggplot(merged_data, aes(x = popularity, y = imdb_votes)) +
+    geom_point(alpha = 0.5,color = "steelblue", na.rm = TRUE) +
+    geom_smooth(method = "loess", color = "red", na.rm = TRUE) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = "TMDB Popularity vs. IMDb Votes", 
+         x = "TMDB Popularity", 
+         y = "IMDb Votes (Log Scale)") +
+    theme_minimal() +
+    theme(text = element_text(family = "STHeiti"))
+
+```
+
+该图展示了影视作品在TMDB平台的热度与IMDb平台投票数量的关系：
+
+
+发现
+1. 位于图表右上象限的作品同时具备高TMDB Popularity 和高IMDb投票数，反映其强大的市场号召力和观众参与度
+2. 当TMDB Popularity 突破50分临界值后，IMDb投票数呈现指数级增长（斜率变化明显），表明内容传播达到特定阈值会显著激发观众评价意愿
+
+### C-3. 构建线性回归模型预测 IMDb Rating
+
+```{r prediction_model}
+
+
+library(tidyverse)
+library(caret)
+options(viewer = NULL)
+
+model_data <- merged_data %>%
+  select(imdb_rating, popularity, duration, imdb_budget, genres) %>%
+  filter(complete.cases(.)) %>%
+  mutate(
+    duration = as.numeric(duration),
+    popularity = as.numeric(popularity),
+    imdb_budget = as.numeric(imdb_budget)
+  )
+
+
+genres_split <- model_data %>%
+  separate_rows(genres, sep = ",\\s*") %>%
+  filter(genres != "") %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = genres, values_from = value, values_fill = 0)
+
+model_data <- model_data %>%
+  select(-genres) %>%
+  left_join(genres_split, by = c("popularity", "duration", "imdb_budget", "imdb_rating"))
+
+
+set.seed(123)
+train_index <- createDataPartition(model_data$imdb_rating, p = 0.8, list = FALSE)
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+
+model <- lm(imdb_rating ~ ., data = train_data)
+
+
+predictions <- predict(model, test_data)
+pred_data <- data.frame(actual = test_data$imdb_rating, predicted = predictions)
+
+
+metrics <- postResample(pred = predictions, obs = test_data$imdb_rating)
+cat("RMSE:", metrics["RMSE"], "\nMAE:", metrics["MAE"], "\nR2:", metrics["Rsquared"])
+
+
+ggplot(pred_data, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5, aes(color = abs(actual - predicted))) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  scale_color_gradient(low = "green", high = "red", name = "预测误差") +
+  labs(title = "IMDb评分预测模型表现",
+       subtitle = paste("R² =", round(metrics["Rsquared"], 2), 
+                       "| RMSE =", round(metrics["RMSE"], 2)),
+       x = "实际评分", 
+       y = "预测评分",
+       caption = "红色虚线表示完美预测") +
+  theme_minimal(base_family = "STHeiti") +
+  theme(plot.title = element_text(face = "bold"))
+
+summary(model)  
+broom::tidy(model) %>% print()
+cat("R-squared:", summary(model)$r.squared, "\n")  
+
+
+```
+
+1. 模型效能
+  - 模型解释力有限（R²=0.25），仅能捕捉25%的评分变异
+  - 预测误差较大（RMSE=0.8），相当于平均偏差近1个评分等级
+  - 数据点呈现"橄榄型"分布，中段评分（5-7分）预测相对准确
+  - 当前模型适仅合作为辅助筛选工具。
+
+### C-4. 聚类分析
+
+
+```{r clustering_analysis}
+
+cluster_data <- merged_data %>%
+  select(imdb_rating, popularity, imdb_gross_worldwide) %>%
+  filter(complete.cases(.)) %>%
+  mutate(
+    imdb_rating = scale(imdb_rating),
+    popularity = scale(popularity),
+    imdb_gross_worldwide = scale(log1p(imdb_gross_worldwide)) 
+  )
+
+  set.seed(123)
+  kmeans_result <- kmeans(cluster_data, centers = 4, nstart = 25)
+  cluster_data$cluster <- as.factor(kmeans_result$cluster)
+  
+  ggplot(cluster_data, aes(x = popularity, y = imdb_rating, color = cluster)) +
+    geom_point(alpha = 0.5) +
+    labs(title = "聚类分析：IMDb Rating vs. TMDB Popularity", 
+         x = "标准化 Popularity", 
+         y = "标准化 IMDb Rating", 
+         color = "Cluster") +
+    theme_minimal() +
+    theme(text = element_text(family = "STHeiti"))
+  
+
+
+```
+该图表为评分与热度聚类分析：
+
+1. 数据点沿对角线分为四个集群：
+
+  - 集群1（左下）：低评分（-5~0标准化值）与低热度（0~10），有可能代表小众低质作品
+  
+  - 集群2（中下）：中等评分（0~2.5）与中低热度（10~20），有可能对应普通商业片
+  
+  - 集群3（右上）：高评分（2.5+）与高热度（20~30），有可能属于精品爆款
+  
+  - 集群4（左上）：特殊的高评分低热度群体，有可能多为艺术电影
+  
+```{r}
+
+  ggplot(cluster_data, aes(x = imdb_gross_worldwide, y = imdb_rating, color = cluster)) +
+    geom_point(alpha = 0.5) +
+    labs(title = "聚类分析：IMDb Rating vs. 全球票房", 
+         x = "标准化 Log(全球票房)", 
+         y = "标准化 IMDb Rating", 
+         color = "Cluster") +
+    theme_minimal() +
+    theme(text = element_text(family = "STHeiti"))
+```
+  
+  
+该图表为评分与票房聚类分析：
+
+2. 四类集群呈现扇形分布：
+
+集群1（左下）：低评分与负向票房，有可能代表亏损作品
+
+集群2（中轴）：中等评分与微利票房（标准化值-2~0）
+
+集群3（右上）：高评分与高票房正相关（每0.5评分提升对应1单位票房增长）
+
+集群4（右下）：揭示"高票房烂片"现象（低评分但票房>0）
+
+### C-5. 分析哪些类型的内容在 IMDb 上表现显著优于 Netflix（或反之）
+
+```{r}
+
+analysis_data <- merged_data %>%
+  mutate(
+
+    imdb_higher = as.factor(ifelse(imdb_rating > popularity/20, "Higher", "Lower")),
+    
+
+    genres = str_replace_all(genres, "\\[|\\]|'", ""),
+    genres_list = str_split(genres, ",\\s*"),
+    
+
+    country = str_replace_all(main_country, "\\[|\\]|'", ""),
+
+    is_usa = ifelse(grepl("United States", country), "USA", "Non-USA"),
+    
+
+    is_english = ifelse(grepl("English", language, ignore.case = TRUE), "English", "Non-English"),
+    
+
+    budget_level = cut(imdb_budget, 
+                      breaks = c(0, 1e6, 1e7, 1e8, Inf),
+                      labels = c("Low", "Medium", "High", "Very High"),
+                      include.lowest = TRUE),
+    
+
+    duration_level = cut(duration,
+                        breaks = c(0, 60, 90, 120, Inf),
+                        labels = c("Short", "Medium", "Long", "Very Long"))
+  ) %>%
+  tidyr::unnest(genres_list) %>%
+  mutate(genres_list = trimws(genres_list))
+
+
+transaction_data <- analysis_data %>%
+  select(imdb_higher, genres_list, is_usa, is_english, budget_level, duration_level) %>%
+  mutate(across(everything(), as.factor))
+
+transactions <- as(transaction_data, "transactions")
+
+
+rules <- apriori(transactions,
+                 parameter = list(support = 0.01, confidence = 0.6),
+                 appearance = list(rhs = "imdb_higher=Higher", default = "lhs"))
+
+significant_rules <- subset(rules, lift > 1.2 & coverage > 0.01)
+significant_rules <- sort(significant_rules, by = "lift")
+
+
+rules <- apriori(transactions,
+                 parameter = list(support = 0.005, confidence = 0.4),
+                 appearance = list(rhs = "imdb_higher=Higher", default = "lhs"))
+
+
+significant_rules <- subset(rules, lift > 1.0)
+significant_rules <- sort(significant_rules, by = "lift")
+
+
+  inspect(head(significant_rules, 10))
+  plot(significant_rules, method = "graph", engine = "htmlwidget")
+
+  genre_stats <- analysis_data %>%
+    group_by(genres_list) %>%
+    summarise(
+      n = n(),
+      imdb_mean = mean(imdb_rating, na.rm = TRUE),
+      netflix_mean = mean(popularity/20, na.rm = TRUE),
+      diff = imdb_mean - netflix_mean
+    ) %>%
+    filter(n >= 10) %>%
+    arrange(desc(abs(diff)))
+  
+  print(genre_stats)
+
+```
+
+
+```{r}
+genre_comparison <- analysis_data %>%
+  group_by(genres_list) %>%
+  summarise(
+    count = n(),
+    avg_imdb = mean(imdb_rating, na.rm = TRUE),
+    avg_netflix = mean(popularity/20, na.rm = TRUE),
+    rating_diff = avg_imdb - avg_netflix
+  ) %>%
+  filter(count > 30) %>%
+  arrange(desc(abs(rating_diff)))
+
+
+ggplot(genre_comparison, aes(x = reorder(genres_list, rating_diff), y = rating_diff)) +
+  geom_col(aes(fill = rating_diff > 0)) +
+  coord_flip() +
+  labs(title = "各类型在IMDb和Netflix上的平均评分差异",
+       x = "影视类型",
+       y = "IMDb评分 - Netflix评分") +
+  scale_fill_manual(values = c("darkred", "blue"), 
+                    name = "IMDb是否更高",
+                    labels = c("Netflix更高", "IMDb更高")) +
+  theme_minimal()+
+    theme(text = element_text(family = "STHeiti"))
+```
+
+该图表为跨平台类型评分差异:
+
+
+1. 平台倾向性
+
+  - IMDb更高：历史、战争、西部片等严肃题材（平均+2.5分）\
+  
+  - Netflix更高：喜剧、家庭类轻松内容（平均+1.2分）\
+  
+  - 犯罪/惊悚类型在两平台评分接近（差异<0.5分）\
+  
+  - 冲奖作品应优先考虑IMDb偏好的剧情/历史类型 \ 
+
+  - 流媒体原创内容可侧重动画/喜剧等Netflix优势类型 \
+
+  - 科幻/犯罪类适合全平台发行，预期评分波动小 \
+
+纪录片与动画分别揭示了IMDb的"精英评审"倾向和Netflix的"大众娱乐"定位
+
+## 最终结论与建议
+
+###  目标 A：内容特征探索与观众偏好分析  
+
+通过对电影和剧集在类型、制作国家、语言、时长、评分与分级、年度趋势及季节性分布等多维度分析，得出以下关键结论：
+
+1.  内容核心与受众偏好： 剧情片和喜剧片在电影和剧集市场中占据主导地位，表明观众对情感共鸣和轻松娱乐内容的需求持续旺盛。剧集在动画、科幻、奇幻和悬疑等类型上表现出更强的多元化趋势，与长篇叙事特点相符。
+2.  全球内容生产格局： 美国在全球内容生产中仍处于领导地位。然而，中国、韩国等亚洲国家在剧集制作和非英语内容输出方面展现出显著增长，特别是中文剧集影响力不断提升，说明全球内容市场区域化特征日益明显。
+3.  电影时长与口碑： 电影时长集中在90-120分钟的“黄金区间”，且在此区间内更易获得高评分。这反映了商业电影在时长上追求叙事效率和观众接受度的平衡。剧集数据虽存在局限性，但其高评分比例高于电影，也就是说剧集更易培养深度观众忠诚度。
+4.  内容发布策略： 电影和剧集的上线趋势趋于稳定，年度总产量波动不大。在季节性方面，剧集更倾向于年初集中发布，而电影则在年中至年末迎来发布高峰，由此显示出平台针对不同内容类型的差异化发布不同的策略。
+
+
+基于上述结论，我们提出以下内容制作与平台运营建议：
+
+1.  精准内容投资： 继续优先投入剧情和喜剧类内容，同时根据平台特点深挖剧集在科幻、奇幻、悬疑等融合类型上的潜力。电影则可在惊悚、动作等次热门类型中寻求创新，以满足不同观众群体的多样化需求。
+2.  深化国际合作： 加强与亚洲国家（尤其是中国、韩国）内容创作者的合作，加大对非英语剧集的投资和引进，以拓展全球市场份额。同时，关注其他小语种内容的增长潜力，实现内容库的多元化布局。
+3.  优化时长与续订机制： 电影制作应继续锚定90-120分钟的“黄金时长”。对于剧集，需改进数据采集和分析，并优化续订策略，鼓励多季优质剧集产出，以提升用户粘性。
+4.  精细化发布计划： 结合电影和剧集不同的季节性发布规律，制定更具针对性的上线计划。剧集可利用年初的观看热潮，电影则可集中在年中至年末的节假日档期，让内容投放效果最大化。
+
+
+### 目标 B：IMDb 电影评分、票房与创作因素分析  
+
+通过对IMDb评分、票房数据与各类创作因素的深入分析，得出以下关键结论：
+
+1.  评分与受欢迎度分布： IMDb评分呈中等偏高分布（集中于5.5-7.5分），而评分人数则集中在1,000至100,000之间。Meta Score也呈现中等偏高分布（60-80分）。高评分作品的投票人数相对较少，表明极高口碑作品往往是小众精品。专业评分（Meta Score）与用户评分总体正相关，但存在“烂番茄效应”，即使低专业评分作品仍可能获得高用户评分。
+
+2.  类型与国家质量： 纪实剧和史诗类电影平均评分最高，非虚构类型普遍优于虚构类。英国和比利时电影评分稳定且居中位数最高，亚洲国家如印度和日本电影评分波动性较大但高分作品突出，美国作为最大产出国则表现中规中矩。
+
+3.  票房与质量/预算关系： 电影评分与全球票房呈弱正相关，中等评分影片贡献了最多高票房。高预算电影普遍票房更高，但中等预算影片也有票房突破的案例，表明内容质量仍是关键。票房在1亿美元以上的作品，其评分通常介于5.5-8.5分，商业成功需要基本质量保证。
+
+4.  创作人员影响力： 顶尖导演（如Christopher Nola）和知名演员（如Leonardo DiCaprio）能通过“少而精”的作品策略，保持高平均评分和低波动性，体现其对作品质量的强大把控力。顶级编剧也展现了剧本质量和稳定性的优势。
+
+5.  奖项与市场效应： 奥斯卡和金球奖获奖影片的平均评分和票房均显著高于未获奖影片，证实了奖项的“光环效应”，能有效提升作品口碑和市场表现，尤其对中小成本影片的票房作用更为明显。
+
+6.  最佳片长区间： 电影时长在90-150分钟区间（尤其是100-130分钟）最容易获得高评分和高票房。过短或过长的影片在评分和票房上均存在两极分化现象，主流商业片建议将时长控制在2小时左右。
+
+基于以上结论，针对电影创作、投资和发行提出以下建议：
+
+1.  内容策略平衡： 在主流类型（剧情、喜剧）中寻求创新，同时加大对纪实剧、史诗类等高评分潜力题材的投资。对于小众艺术片，可侧重口碑而非票房预期。
+2.  全球化合作与人才挖掘： 关注英国、比利时等欧洲国家的高质量内容合作，同时深挖亚洲市场中印日韩等国的优秀创作人才，特别是那些作品数量不多但质量稳定的导演、演员和编剧。
+3.  预算与质量并重： 高预算仍是票房成功的关键因素之一，但投资方应更注重内容本身质量，鼓励中等预算下的高质量作品。避免盲目追求大制作，以防高预算低回报的风险。
+4.  奖项营销策略： 积极参与奥斯卡、金球奖等主要电影奖项的角逐，将其视为重要的口碑和票房助推器。尤其对于中小成本影片，获奖标签能带来显著的市场溢价。
+5.  优化片长设计： 制作主流商业片时，应将片长控制在90-150分钟的“最佳区间”，以最大化观众接受度和市场表现。对于系列电影或特定粉丝群体的作品，可适当放宽片长限制。
+
+---
+
+###  目标 C：TMDB 与 IMDb 数据整合与跨平台对比 
+
+通过对Netflix电影在TMDB热度与IMDb评分/投票数、票房以及不同内容类型在两平台表现差异的分析，得出以下关键结论：
+
+1.  平台关注点差异： TMDB热度与IMDb评分存在弱正相关，但非线性。TMDB更偏向新近和流行作品，反映短期热度和用户关注度；而IMDb评分更保守，代表长期口碑和更广泛的用户评价。高TMDB热度作品在IMDb上通常获得中等评分（6-8分），极少达到9分以上，出现了"热门不等于高口碑"的现象。
+2.  热度与参与度关联： TMDB热度与IMDb投票数呈显著正相关，特别是当热度突破50分阈值后，投票数呈指数级增长，也就是说高热度能有效激发用户参与和评价意愿。
+3.  IMDb评分预测挑战： 基于Popularity、Duration、Budget和Genres构建的线性回归模型对IMDb评分的解释力有限（R²=0.25），预测误差较大（RMSE=0.8）。这表明IMDb评分受多维复杂因素影响，并非单一指标能准确预测，当前模型仅适合作为辅助筛选工具。
+4.  内容集群特征： 聚类分析揭示了作品在评分、热度和票房维度的不同集群。例如，存在“精品爆款”（高评分、高热度）、“普通商业片”（中等评分、中低热度）以及“高票房烂片”（低评分但高票房）等类型，为内容评估提供了多维视角。
+5.  跨平台类型偏好： IMDb平台对历史、战争、西部片等严肃题材的评分显著高于Netflix，反映其“精英评审”倾向。而Netflix则更受喜剧、家庭类轻松内容的欢迎，体现其“大众娱乐”定位。科幻/犯罪类在两平台表现相对接近。
+
+基于以上结论，针对内容创作、发行和平台运营提出以下建议：
+
+1.  双平台指标并重： 针对全球市场，内容方应同时关注TMDB热度和IMDb评分。TMDB热度可用于预测初期流量和市场关注度，而IMDb评分则反映作品的长期口碑和影响力。
+2.  内容营销精准化： 充分利用内容高热度转化为用户参与的潜力。在作品热度达到一定阈值时，应加大营销力度，鼓励用户在IMDb等平台进行评价和讨论，以提升作品的投票数和可见度。
+3.  多维评估体系构建： 鉴于单一模型预测IMDb评分的局限性，应建立多维度的内容评估体系。结合评分、热度、票房、类型和用户反馈等多个指标进行综合判断，尤其关注不同集群的特征，以便更全面地评估作品的市场潜力和受众反响。
+4.  差异化内容布局： 针对不同平台的观众偏好，进行差异化的内容创作和发行。冲奖或追求深度口碑的作品可侧重IMDb偏好的历史、剧情等严肃题材。而面向大众、注重轻松娱乐的原创内容，可更多地投入Netflix优势的喜剧、动画等类型。科幻/犯罪类则可考虑全平台均衡发行。
